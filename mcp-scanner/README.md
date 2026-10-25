@@ -9,9 +9,12 @@ Requer Python 3.9+ e não tem dependências de runtime. A instalação do pacote
 ```bash
 python3 -m pip install ./mcp-scanner
 mcp-sec scan caminho/para/config.json --fail-on high --format sarif --output mcp-sec.sarif
+mcp-sec scan .mcp claude_desktop_config.json --format json
 ```
 
-O comando retorna `0` quando nenhum achado alcança o limiar, `1` quando alcança e `2` quando não consegue ler, validar ou gravar. `--fail-on` aceita `critical`, `high`, `medium`, `low` e `none` (padrão: `low`). `--format` aceita `json`, `text` e `sarif`; `--output` grava o relatório no caminho indicado e o substitui se já existir. Sem `--output`, o relatório vai para stdout e erros para stderr. Cada achado inclui mensagem e recomendação de correção.
+O comando retorna `0` quando nenhum achado alcança o limiar, `1` quando alcança e `2` quando não consegue ler, validar ou gravar. `--fail-on` aceita `critical`, `high`, `medium`, `low` e `none` (padrão: `low`). `--format` aceita `json`, `text` e `sarif`; `--output` grava o relatório no caminho indicado e o substitui se já existir. Sem `--output`, o relatório vai para stdout; erros de leitura/validação aparecem no relatório JSON ou texto, e no stderr quando se usa SARIF. Cada achado inclui mensagem e recomendação de correção.
+
+O scanner aceita vários arquivos e diretórios. Em diretórios, busca recursivamente arquivos `.json`, incluindo pastas ocultas como `.mcp`; ignora `.git`, dependências, ambientes virtuais, caches, `build`, `dist`, `target`, diretórios `tests/fixtures` e links simbólicos. Para evitar varreduras acidentais muito grandes, limita cada execução a 500 arquivos JSON de até 1 MiB; arquivos inválidos, ausentes ou acima do limite produzem erro e código de saída `2`.
 
 Os relatórios omitem valores, argumentos, nomes originais de servidores, nomes de variáveis sensíveis e valores de cabeçalhos. O SARIF 2.1.0 aponta ao arquivo de configuração sem linha específica; GitHub Code Scanning exige ao menos uma localização para exibir um alerta, mas localização de linha é necessária para anotação precisa no código. Para localização útil no GitHub, rode a CLI da raiz do checkout e passe caminhos dentro do repositório. O envio para GitHub ainda não está configurado.
 

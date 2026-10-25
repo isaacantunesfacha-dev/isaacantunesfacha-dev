@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,6 +26,9 @@ RECOMMENDATIONS = {
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 SARIF_LEVEL = {"low": "note", "medium": "warning", "high": "error", "critical": "error"}
 SECURITY_SCORE = {"low": "2.5", "medium": "5.0", "high": "7.5", "critical": "9.5"}
+EXCLUDED_DIRS = {".git", ".venv", "venv", "node_modules", "vendor", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".cache", ".next", ".terraform", "coverage", "build", "dist", "target"}
+MAX_CONFIG_FILES = 500
+MAX_CONFIG_BYTES = 1_048_576
 
 
 def _validate_server(name: Any, server: Any) -> None:
@@ -109,13 +113,61 @@ def scan_config(config: Any) -> list[dict[str, str]]:
     return findings
 
 
-def sarif_report(findings: list[dict[str, str]], source: Path) -> dict[str, Any]:
-    """Build SARIF 2.1.0 with a safe, repository-relative config URI."""
+def _display_path(path: Path) -> str:
     try:
-        uri = quote(source.resolve().relative_to(Path.cwd().resolve()).as_posix(), safe="/")
+        return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
     except ValueError:
-        uri = quote(source.name, safe="")
+        return path.name
 
+
+def discover_configs(inputs: list[Path]) -> tuple[list[Path], list[str]]:
+    """Collect JSON files from explicit files/directories without following symlinks."""
+    files: list[Path] = []
+    errors: list[str] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> bool:
+        resolved = path.resolve()
+        if resolved in seen:
+            return True
+        if len(files) >= MAX_CONFIG_FILES:
+            errors.append(f"Limite de arquivos atingido ({MAX_CONFIG_FILES}).")
+            return False
+        seen.add(resolved)
+        files.append(path)
+        return True
+
+    for item in inputs:
+        if item.is_symlink():
+            errors.append(f"{_display_path(item)}: link simbólico ignorado.")
+        elif item.is_file():
+            if not add(item):
+                return files, errors
+        elif item.is_dir():
+            def walk_error(error: OSError) -> None:
+                errors.append(f"{_display_path(Path(error.filename or item))}: diretório não pôde ser lido.")
+
+            for root, dirs, names in os.walk(item, topdown=True, followlinks=False, onerror=walk_error):
+                base = Path(root)
+                relative_parts = base.relative_to(item).parts
+                dirs[:] = [
+                    name for name in dirs
+                    if name not in EXCLUDED_DIRS
+                    and not (len(relative_parts) >= 1 and relative_parts[-1] in {"test", "tests"} and name == "fixtures")
+                    and not (base / name).is_symlink()
+                ]
+                for name in sorted(names):
+                    candidate = base / name
+                    if name.lower().endswith(".json") and not candidate.is_symlink():
+                        if not add(candidate):
+                            return files, errors
+        else:
+            errors.append(f"{_display_path(item)}: caminho inexistente ou tipo não suportado.")
+    return files, errors
+
+
+def sarif_report(findings: list[dict[str, str]], source: Path | None = None) -> dict[str, Any]:
+    """Build SARIF 2.1.0 with repository-relative config URIs."""
     rules = sorted({finding["rule"] for finding in findings})
     rule_indexes = {rule: index for index, rule in enumerate(rules)}
     descriptors = [{
@@ -129,16 +181,19 @@ def sarif_report(findings: list[dict[str, str]], source: Path) -> dict[str, Any]
             "security-severity": SECURITY_SCORE[next(f["severity"] for f in findings if f["rule"] == rule)],
         },
     } for rule in rules]
-    results = [{
-        "ruleId": finding["rule"],
-        "ruleIndex": rule_indexes[finding["rule"]],
-        "level": SARIF_LEVEL[finding["severity"]],
-        "message": {"text": f"{finding['message']} Recomendação: {finding['recommendation']}"},
-        "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}}}],
-        "partialFingerprints": {
-            "mcpScanner/v1": f"{uri}:{finding['server']}:{finding['rule']}"
-        },
-    } for finding in findings]
+    results = []
+    for finding in findings:
+        uri = _sarif_uri(Path(finding.get("source", str(source or ""))))
+        results.append({
+            "ruleId": finding["rule"],
+            "ruleIndex": rule_indexes[finding["rule"]],
+            "level": SARIF_LEVEL[finding["severity"]],
+            "message": {"text": f"{finding['message']} Recomendação: {finding['recommendation']}"},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}}}],
+            "partialFingerprints": {
+                "mcpScanner/v1": f"{uri}:{finding['server']}:{finding['rule']}"
+            },
+        })
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -146,11 +201,18 @@ def sarif_report(findings: list[dict[str, str]], source: Path) -> dict[str, Any]
     }
 
 
+def _sarif_uri(source: Path) -> str:
+    try:
+        return quote(source.resolve().relative_to(Path.cwd().resolve()).as_posix(), safe="/")
+    except ValueError:
+        return quote(source.name, safe="")
+
+
 def _render_text(findings: list[dict[str, str]]) -> str:
     if not findings:
         return "Nenhum risco encontrado."
     return "\n".join(
-        f"[{item['severity'].upper()}] {item['server']} / {item['rule']}: {item['message']}\n  Recomendação: {item['recommendation']}"
+        f"[{item['severity'].upper()}] {item.get('source', 'config')} / {item['server']} / {item['rule']}: {item['message']}\n  Recomendação: {item['recommendation']}"
         for item in findings
     )
 
@@ -159,28 +221,46 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     scan = commands.add_parser("scan", help="analisar uma configuração MCP JSON")
-    scan.add_argument("config", type=Path, help="arquivo JSON de configuração MCP")
+    scan.add_argument("configs", type=Path, nargs="+", help="arquivos JSON e/ou diretórios para busca")
     scan.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "none"], default="low",
                       help="severidade mínima que faz o comando retornar código 1 (padrão: low)")
     scan.add_argument("--format", choices=["json", "text", "sarif"], default="json", help="formato do relatório")
     scan.add_argument("-o", "--output", type=Path, help="arquivo de saída; padrão: stdout")
     args = parser.parse_args(argv)
-    try:
-        config = json.loads(args.config.read_text(encoding="utf-8"))
-        findings = scan_config(config)
-    except OSError:
-        print("Erro: não foi possível ler o arquivo informado.", file=sys.stderr)
-        return 2
-    except (UnicodeError, json.JSONDecodeError, ValueError):
-        print("Erro: configuração inválida; revise os campos MCP e o JSON informado.", file=sys.stderr)
-        return 2
+    paths, errors = discover_configs(args.configs)
+    if not paths:
+        errors.append("Nenhum arquivo JSON de configuração foi encontrado.")
+    findings: list[dict[str, str]] = []
+    files_scanned = 0
+    for path in paths:
+        try:
+            with path.open("rb") as config_file:
+                raw_config = config_file.read(MAX_CONFIG_BYTES + 1)
+            if len(raw_config) > MAX_CONFIG_BYTES:
+                errors.append(f"{_display_path(path)}: arquivo excede o limite de {MAX_CONFIG_BYTES} bytes.")
+                continue
+            config = json.loads(raw_config.decode("utf-8"))
+            file_findings = scan_config(config)
+        except OSError:
+            errors.append(f"{_display_path(path)}: arquivo não pôde ser lido.")
+            continue
+        except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError):
+            errors.append(f"{_display_path(path)}: JSON ou configuração MCP inválida.")
+            continue
+        files_scanned += 1
+        findings.extend({**finding, "source": _display_path(path)} for finding in file_findings)
 
     if args.format == "json":
-        output = json.dumps({"findings": findings, "count": len(findings)}, ensure_ascii=False, indent=2)
+        output = json.dumps({"files_scanned": files_scanned, "findings": findings, "count": len(findings), "errors": errors}, ensure_ascii=False, indent=2)
     elif args.format == "sarif":
-        output = json.dumps(sarif_report(findings, args.config), ensure_ascii=False, indent=2)
+        output = json.dumps(sarif_report(findings), ensure_ascii=False, indent=2)
     else:
         output = _render_text(findings)
+        if errors:
+            output += "\n" + "\n".join(f"[ERRO] {error}" for error in errors)
+    if args.format == "sarif":
+        for error in errors:
+            print(f"Erro: {error}", file=sys.stderr)
     try:
         if args.output:
             args.output.write_text(output + "\n", encoding="utf-8")
@@ -193,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = args.fail_on != "none" and any(
         SEVERITY_ORDER[item["severity"]] >= SEVERITY_ORDER[args.fail_on] for item in findings
     )
-    return 1 if failed else 0
+    return 2 if errors else (1 if failed else 0)
 
 
 if __name__ == "__main__":
