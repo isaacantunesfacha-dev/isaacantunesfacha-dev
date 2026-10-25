@@ -5,12 +5,53 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 SENSITIVE_NAME = ("token", "secret", "password", "api_key", "apikey", "credential", "auth")
+AUTH_HEADERS = {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"}
+ENV_REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+
+def _validate_server(name: Any, server: Any) -> None:
+    """Validate supported MCP server config shapes without echoing values."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Nomes de servidor MCP precisam ser textos não vazios.")
+    if not isinstance(server, dict):
+        raise ValueError(f"A configuração do servidor '{name}' precisa ser um objeto.")
+
+    command, url = server.get("command"), server.get("url")
+    transport = server.get("type", "stdio" if command is not None else "http")
+    if not isinstance(transport, str) or transport not in {"stdio", "http", "sse"}:
+        raise ValueError(f"Transporte não suportado no servidor '{name}'.")
+    if transport == "stdio":
+        if not isinstance(command, str) or not command.strip() or url is not None:
+            raise ValueError(f"Servidor stdio '{name}' precisa de command e não pode definir url.")
+    else:
+        if not isinstance(url, str) or command is not None:
+            raise ValueError(f"Servidor remoto '{name}' precisa de url e não pode definir command.")
+        try:
+            parsed = urlsplit(url)
+        except ValueError as exc:
+            raise ValueError(f"URL inválida no servidor '{name}'.") from exc
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError(f"URL inválida no servidor '{name}'; credenciais devem ficar em headers.")
+
+    for key, expected in (("args", list), ("env", dict), ("headers", dict)):
+        value = server.get(key, expected())
+        if not isinstance(value, expected):
+            raise ValueError(f"'{key}' inválido no servidor '{name}'.")
+    if any(not isinstance(arg, str) for arg in server.get("args", [])):
+        raise ValueError(f"'args' do servidor '{name}' precisa conter apenas textos.")
+    for key in ("env", "headers"):
+        if any(not isinstance(k, str) or not isinstance(v, str) for k, v in server.get(key, {}).items()):
+            raise ValueError(f"'{key}' do servidor '{name}' precisa mapear textos para textos.")
+    if transport == "stdio" and server.get("headers"):
+        raise ValueError(f"'headers' só é aceito em servidores remotos ('{name}').")
 
 
 def scan_config(config: Any) -> list[dict[str, str]]:
@@ -24,8 +65,7 @@ def scan_config(config: Any) -> list[dict[str, str]]:
 
     findings: list[dict[str, str]] = []
     for name, server in servers.items():
-        if not isinstance(server, dict):
-            continue
+        _validate_server(name, server)
 
         command = server.get("command")
         url = server.get("url", "")
@@ -35,17 +75,18 @@ def scan_config(config: Any) -> list[dict[str, str]]:
 
         if isinstance(command, str) and Path(command).name in {"npx", "uvx"}:
             add("package_runner", "medium", "Servidor usa um runner que pode baixar código ao iniciar.")
-        if isinstance(url, str) and url.lower().startswith("http://"):
+        if isinstance(url, str) and urlsplit(url).scheme == "http":
             add("cleartext_transport", "high", "URL HTTP não protege o tráfego com TLS.")
         headers = server.get("headers", {})
         if isinstance(headers, dict):
-            for key in headers:
-                add("inline_auth_header", "high", f"Cabeçalho '{key}' está declarado inline; use uma referência a variável de ambiente.")
+            for key, value in headers.items():
+                if key.lower() in AUTH_HEADERS and not ENV_REFERENCE.fullmatch(value):
+                    add("inline_auth_header", "high", f"Cabeçalho '{key}' contém valor inline; use uma referência a variável de ambiente.")
 
         env = server.get("env", {})
         if isinstance(env, dict):
             for key in env:
-                if any(part in str(key).lower() for part in SENSITIVE_NAME):
+                if any(part in key.lower() for part in SENSITIVE_NAME) and not ENV_REFERENCE.fullmatch(env[key]):
                     add("inline_sensitive_env", "medium", f"'{key}' pode conter credencial; mantenha o valor fora do arquivo compartilhado.")
 
         if isinstance(command, str) and command and not Path(command).is_absolute() and Path(command).parent != Path("."):
