@@ -10,7 +10,7 @@ Requer Python 3.10+ e usa somente a biblioteca padrão. A partir da raiz do repo
 python3 mcp-scanner/mcp_scanner.py caminho/para/config.json
 ```
 
-O comando retorna `0` quando não encontra achados, `1` quando encontra riscos e `2` quando não consegue ler ou validar o arquivo. Os achados são enviados em JSON para stdout; erros vão para stderr. Não passe arquivos com segredos: valores de ambiente e argumentos são deliberadamente omitidos do relatório.
+O comando retorna `0` quando não encontra achados, `1` quando encontra riscos e `2` quando não consegue ler ou validar o arquivo. Os achados são enviados em JSON para stdout; erros vão para stderr. Cada achado inclui mensagem e recomendação de correção. Não passe arquivos com segredos: valores de ambiente e argumentos são deliberadamente omitidos do relatório.
 
 ## Verificações iniciais
 
@@ -23,6 +23,8 @@ O comando retorna `0` quando não encontra achados, `1` quando encontra riscos e
 Este MVP faz análise estática heurística: não prova explorabilidade, não verifica a confiabilidade de pacotes e pode gerar falsos positivos. Não é uma auditoria de segurança completa.
 
 ## Testes
+
+A suíte usa somente fixtures sintéticas em `tests/fixtures/` (um exemplo sem achados e outro com riscos conhecidos).
 
 ```bash
 python3 -m unittest discover -s mcp-scanner/tests -v

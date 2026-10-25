@@ -1,5 +1,6 @@
 import unittest
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -7,6 +8,17 @@ from mcp_scanner import scan_config
 
 
 class ScanConfigTests(unittest.TestCase):
+    def test_synthetic_fixture_corpus_and_recommendations(self):
+        fixtures = Path(__file__).parent / "fixtures"
+        clean = json.loads((fixtures / "clean.json").read_text(encoding="utf-8"))
+        risky = json.loads((fixtures / "risky.json").read_text(encoding="utf-8"))
+        self.assertEqual(scan_config(clean), [])
+        findings = scan_config(risky)
+        self.assertEqual({finding["rule"] for finding in findings}, {
+            "package_runner", "inline_sensitive_env", "cleartext_transport", "inline_auth_header",
+        })
+        self.assertTrue(all(finding["recommendation"] for finding in findings))
+
     def test_reports_risky_patterns_without_leaking_values(self):
         findings = scan_config({"mcpServers": {
             "local": {"command": "npx", "args": ["secret-package"], "env": {"API_TOKEN": "do-not-print"}},

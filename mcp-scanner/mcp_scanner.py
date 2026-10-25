@@ -15,6 +15,13 @@ from urllib.parse import urlsplit
 SENSITIVE_NAME = ("token", "secret", "password", "api_key", "apikey", "credential", "auth")
 AUTH_HEADERS = {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"}
 ENV_REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+RECOMMENDATIONS = {
+    "package_runner": "Fixe versões e origem do pacote; prefira instalação reproduzível e revisão de dependências.",
+    "cleartext_transport": "Use HTTPS para proteger dados e credenciais durante o transporte.",
+    "inline_auth_header": "Injete o valor por variável de ambiente ou gerenciador de segredos.",
+    "inline_sensitive_env": "Remova o segredo do arquivo e injete-o pelo ambiente em tempo de execução.",
+    "relative_command": "Use caminho absoluto confiável ou resolva o executável em ambiente controlado.",
+}
 
 
 def _validate_server(name: Any, server: Any) -> None:
@@ -71,7 +78,10 @@ def scan_config(config: Any) -> list[dict[str, str]]:
         url = server.get("url", "")
 
         def add(rule: str, severity: str, message: str) -> None:
-            findings.append({"server": str(name), "rule": rule, "severity": severity, "message": message})
+            findings.append({
+                "server": str(name), "rule": rule, "severity": severity,
+                "message": message, "recommendation": RECOMMENDATIONS[rule],
+            })
 
         if isinstance(command, str) and Path(command).name in {"npx", "uvx"}:
             add("package_runner", "medium", "Servidor usa um runner que pode baixar código ao iniciar.")

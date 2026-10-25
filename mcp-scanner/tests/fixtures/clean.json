@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "local-safe": {
+      "command": "/usr/local/bin/python3",
+      "args": ["-m", "safe_server"],
+      "env": {"API_TOKEN": "${API_TOKEN}"}
+    },
+    "remote-safe": {
+      "type": "http",
+      "url": "https://mcp.example.test/rpc",
+      "headers": {"Authorization": "${MCP_TOKEN}", "Accept": "application/json"}
+    }
+  }
+}
