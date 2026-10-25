@@ -4,13 +4,18 @@ Scanner local e offline de configurações de clientes MCP. Ele identifica padr�
 
 ## Uso
 
-Requer Python 3.10+ e usa somente a biblioteca padrão. A partir da raiz do repositório:
+Requer Python 3.9+ e não tem dependências de runtime. A instalação do pacote usa setuptools como backend de build. A partir da raiz do repositório:
 
 ```bash
-python3 mcp-scanner/mcp_scanner.py caminho/para/config.json
+python3 -m pip install ./mcp-scanner
+mcp-sec scan caminho/para/config.json --fail-on high --format sarif --output mcp-sec.sarif
 ```
 
-O comando retorna `0` quando não encontra achados, `1` quando encontra riscos e `2` quando não consegue ler ou validar o arquivo. Os achados são enviados em JSON para stdout; erros vão para stderr. Cada achado inclui mensagem e recomendação de correção. Não passe arquivos com segredos: valores de ambiente e argumentos são deliberadamente omitidos do relatório.
+O comando retorna `0` quando nenhum achado alcança o limiar, `1` quando alcança e `2` quando não consegue ler, validar ou gravar. `--fail-on` aceita `critical`, `high`, `medium`, `low` e `none` (padrão: `low`). `--format` aceita `json`, `text` e `sarif`; `--output` grava o relatório no caminho indicado e o substitui se já existir. Sem `--output`, o relatório vai para stdout e erros para stderr. Cada achado inclui mensagem e recomendação de correção.
+
+Os relatórios omitem valores, argumentos, nomes originais de servidores, nomes de variáveis sensíveis e valores de cabeçalhos. O SARIF 2.1.0 aponta ao arquivo de configuração sem linha específica; GitHub Code Scanning exige ao menos uma localização para exibir um alerta, mas localização de linha é necessária para anotação precisa no código. Para localização útil no GitHub, rode a CLI da raiz do checkout e passe caminhos dentro do repositório. O envio para GitHub ainda não está configurado.
+
+Mesmo com os valores removidos, relatórios podem revelar caminhos e classes de riscos. Em repositórios públicos, não versione arquivos reais de configuração MCP nem relatórios gerados a partir de ambientes privados; use fixtures sintéticas e um gerenciador de segredos. Consulte [SARIF suportado pelo GitHub](https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support).
 
 ## Verificações iniciais
 

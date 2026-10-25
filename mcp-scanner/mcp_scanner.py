@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 SENSITIVE_NAME = ("token", "secret", "password", "api_key", "apikey", "credential", "auth")
@@ -22,43 +22,47 @@ RECOMMENDATIONS = {
     "inline_sensitive_env": "Remova o segredo do arquivo e injete-o pelo ambiente em tempo de execução.",
     "relative_command": "Use caminho absoluto confiável ou resolva o executável em ambiente controlado.",
 }
+SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+SARIF_LEVEL = {"low": "note", "medium": "warning", "high": "error", "critical": "error"}
+SECURITY_SCORE = {"low": "2.5", "medium": "5.0", "high": "7.5", "critical": "9.5"}
 
 
 def _validate_server(name: Any, server: Any) -> None:
     """Validate supported MCP server config shapes without echoing values."""
     if not isinstance(name, str) or not name.strip():
-        raise ValueError("Nomes de servidor MCP precisam ser textos não vazios.")
+        raise ValueError("Nome de servidor MCP inválido.")
     if not isinstance(server, dict):
-        raise ValueError(f"A configuração do servidor '{name}' precisa ser um objeto.")
+        raise ValueError("Configuração de servidor MCP precisa ser um objeto.")
 
     command, url = server.get("command"), server.get("url")
     transport = server.get("type", "stdio" if command is not None else "http")
     if not isinstance(transport, str) or transport not in {"stdio", "http", "sse"}:
-        raise ValueError(f"Transporte não suportado no servidor '{name}'.")
+        raise ValueError("Transporte MCP não suportado.")
     if transport == "stdio":
         if not isinstance(command, str) or not command.strip() or url is not None:
-            raise ValueError(f"Servidor stdio '{name}' precisa de command e não pode definir url.")
+            raise ValueError("Servidor stdio precisa de command e não pode definir url.")
     else:
         if not isinstance(url, str) or command is not None:
-            raise ValueError(f"Servidor remoto '{name}' precisa de url e não pode definir command.")
+            raise ValueError("Servidor remoto precisa de url e não pode definir command.")
         try:
             parsed = urlsplit(url)
+            _ = parsed.port  # Validate port syntax without echoing the URL.
         except ValueError as exc:
-            raise ValueError(f"URL inválida no servidor '{name}'.") from exc
+            raise ValueError("URL MCP inválida.") from exc
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-            raise ValueError(f"URL inválida no servidor '{name}'; credenciais devem ficar em headers.")
+            raise ValueError("URL MCP inválida; credenciais devem ficar em headers.")
 
     for key, expected in (("args", list), ("env", dict), ("headers", dict)):
         value = server.get(key, expected())
         if not isinstance(value, expected):
-            raise ValueError(f"'{key}' inválido no servidor '{name}'.")
+            raise ValueError(f"Campo MCP '{key}' inválido.")
     if any(not isinstance(arg, str) for arg in server.get("args", [])):
-        raise ValueError(f"'args' do servidor '{name}' precisa conter apenas textos.")
+        raise ValueError("Campo MCP 'args' precisa conter apenas textos.")
     for key in ("env", "headers"):
         if any(not isinstance(k, str) or not isinstance(v, str) for k, v in server.get(key, {}).items()):
-            raise ValueError(f"'{key}' do servidor '{name}' precisa mapear textos para textos.")
+            raise ValueError(f"Campo MCP '{key}' precisa mapear textos para textos.")
     if transport == "stdio" and server.get("headers"):
-        raise ValueError(f"'headers' só é aceito em servidores remotos ('{name}').")
+        raise ValueError("Campo MCP 'headers' só é aceito em servidores remotos.")
 
 
 def scan_config(config: Any) -> list[dict[str, str]]:
@@ -71,7 +75,7 @@ def scan_config(config: Any) -> list[dict[str, str]]:
         raise ValueError("'mcpServers' ou 'servers' precisa ser um objeto JSON.")
 
     findings: list[dict[str, str]] = []
-    for name, server in servers.items():
+    for index, (name, server) in enumerate(servers.items(), start=1):
         _validate_server(name, server)
 
         command = server.get("command")
@@ -79,7 +83,7 @@ def scan_config(config: Any) -> list[dict[str, str]]:
 
         def add(rule: str, severity: str, message: str) -> None:
             findings.append({
-                "server": str(name), "rule": rule, "severity": severity,
+                "server": f"server-{index}", "rule": rule, "severity": severity,
                 "message": message, "recommendation": RECOMMENDATIONS[rule],
             })
 
@@ -91,13 +95,13 @@ def scan_config(config: Any) -> list[dict[str, str]]:
         if isinstance(headers, dict):
             for key, value in headers.items():
                 if key.lower() in AUTH_HEADERS and not ENV_REFERENCE.fullmatch(value):
-                    add("inline_auth_header", "high", f"Cabeçalho '{key}' contém valor inline; use uma referência a variável de ambiente.")
+                    add("inline_auth_header", "high", "Cabeçalho de autenticação contém valor inline; use uma referência a variável de ambiente.")
 
         env = server.get("env", {})
         if isinstance(env, dict):
             for key in env:
                 if any(part in key.lower() for part in SENSITIVE_NAME) and not ENV_REFERENCE.fullmatch(env[key]):
-                    add("inline_sensitive_env", "medium", f"'{key}' pode conter credencial; mantenha o valor fora do arquivo compartilhado.")
+                    add("inline_sensitive_env", "medium", "Variável de ambiente sensível contém valor inline; injete o segredo em tempo de execução.")
 
         if isinstance(command, str) and command and not Path(command).is_absolute() and Path(command).parent != Path("."):
             add("relative_command", "low", "Comando relativo depende do PATH e do diretório de execução.")
@@ -105,19 +109,91 @@ def scan_config(config: Any) -> list[dict[str, str]]:
     return findings
 
 
-def main() -> int:
+def sarif_report(findings: list[dict[str, str]], source: Path) -> dict[str, Any]:
+    """Build SARIF 2.1.0 with a safe, repository-relative config URI."""
+    try:
+        uri = quote(source.resolve().relative_to(Path.cwd().resolve()).as_posix(), safe="/")
+    except ValueError:
+        uri = quote(source.name, safe="")
+
+    rules = sorted({finding["rule"] for finding in findings})
+    rule_indexes = {rule: index for index, rule in enumerate(rules)}
+    descriptors = [{
+        "id": rule,
+        "name": rule,
+        "shortDescription": {"text": rule.replace("_", " ").capitalize()},
+        "defaultConfiguration": {"level": SARIF_LEVEL[next(f["severity"] for f in findings if f["rule"] == rule)]},
+        "properties": {
+            "tags": ["security"],
+            "precision": "medium",
+            "security-severity": SECURITY_SCORE[next(f["severity"] for f in findings if f["rule"] == rule)],
+        },
+    } for rule in rules]
+    results = [{
+        "ruleId": finding["rule"],
+        "ruleIndex": rule_indexes[finding["rule"]],
+        "level": SARIF_LEVEL[finding["severity"]],
+        "message": {"text": f"{finding['message']} Recomendação: {finding['recommendation']}"},
+        "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}}}],
+        "partialFingerprints": {
+            "mcpScanner/v1": f"{uri}:{finding['server']}:{finding['rule']}"
+        },
+    } for finding in findings]
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{"tool": {"driver": {"name": "MCP Scanner", "semanticVersion": "0.1.0", "rules": descriptors}}, "results": results}],
+    }
+
+
+def _render_text(findings: list[dict[str, str]]) -> str:
+    if not findings:
+        return "Nenhum risco encontrado."
+    return "\n".join(
+        f"[{item['severity'].upper()}] {item['server']} / {item['rule']}: {item['message']}\n  Recomendação: {item['recommendation']}"
+        for item in findings
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", type=Path, help="arquivo JSON de configuração MCP")
-    args = parser.parse_args()
+    commands = parser.add_subparsers(dest="command", required=True)
+    scan = commands.add_parser("scan", help="analisar uma configuração MCP JSON")
+    scan.add_argument("config", type=Path, help="arquivo JSON de configuração MCP")
+    scan.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "none"], default="low",
+                      help="severidade mínima que faz o comando retornar código 1 (padrão: low)")
+    scan.add_argument("--format", choices=["json", "text", "sarif"], default="json", help="formato do relatório")
+    scan.add_argument("-o", "--output", type=Path, help="arquivo de saída; padrão: stdout")
+    args = parser.parse_args(argv)
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
         findings = scan_config(config)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        print(f"Erro: {exc}", file=sys.stderr)
+    except OSError:
+        print("Erro: não foi possível ler o arquivo informado.", file=sys.stderr)
+        return 2
+    except (UnicodeError, json.JSONDecodeError, ValueError):
+        print("Erro: configuração inválida; revise os campos MCP e o JSON informado.", file=sys.stderr)
         return 2
 
-    print(json.dumps({"findings": findings, "count": len(findings)}, ensure_ascii=False, indent=2))
-    return 1 if findings else 0
+    if args.format == "json":
+        output = json.dumps({"findings": findings, "count": len(findings)}, ensure_ascii=False, indent=2)
+    elif args.format == "sarif":
+        output = json.dumps(sarif_report(findings, args.config), ensure_ascii=False, indent=2)
+    else:
+        output = _render_text(findings)
+    try:
+        if args.output:
+            args.output.write_text(output + "\n", encoding="utf-8")
+        else:
+            print(output)
+    except OSError:
+        print("Erro: não foi possível gravar o relatório.", file=sys.stderr)
+        return 2
+
+    failed = args.fail_on != "none" and any(
+        SEVERITY_ORDER[item["severity"]] >= SEVERITY_ORDER[args.fail_on] for item in findings
+    )
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

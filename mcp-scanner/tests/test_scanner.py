@@ -1,6 +1,8 @@
 import unittest
 import sys
 import json
+import subprocess
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,6 +20,49 @@ class ScanConfigTests(unittest.TestCase):
             "package_runner", "inline_sensitive_env", "cleartext_transport", "inline_auth_header",
         })
         self.assertTrue(all(finding["recommendation"] for finding in findings))
+
+    def test_cli_fail_threshold_formats_sarif_and_keeps_labels_private(self):
+        project = Path(__file__).resolve().parents[1]
+        scanner = project / "mcp_scanner.py"
+        config = Path(__file__).parent / "fixtures" / "risky.json"
+        sarif = subprocess.run(
+            [sys.executable, str(scanner), "scan", str(config), "--format", "sarif", "--fail-on", "high"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(sarif.returncode, 1)
+        report = json.loads(sarif.stdout)
+        self.assertEqual(report["version"], "2.1.0")
+        self.assertTrue(all(result["locations"] for result in report["runs"][0]["results"]))
+        self.assertNotIn("local-risky", sarif.stdout)
+        self.assertNotIn("synthetic-placeholder", sarif.stdout)
+        self.assertNotIn("API_TOKEN", sarif.stdout)
+
+        high_threshold = subprocess.run(
+            [sys.executable, str(scanner), "scan", str(config), "--fail-on", "high", "--format", "json"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(high_threshold.returncode, 1)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            low_config = Path(temp_dir) / "low.json"
+            output = Path(temp_dir) / "report.json"
+            low_config.write_text(json.dumps({"mcpServers": {"private-server-name": {"command": "npx"}}}), encoding="utf-8")
+            below_threshold = subprocess.run(
+                [sys.executable, str(scanner), "scan", str(low_config), "--fail-on", "high", "--output", str(output)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(below_threshold.returncode, 0)
+            report_text = output.read_text(encoding="utf-8")
+            self.assertNotIn("private-server-name", report_text)
+            self.assertNotIn("\"API_TOKEN\"", report_text)
+
+        ignored = subprocess.run(
+            [sys.executable, str(scanner), "scan", str(config), "--fail-on", "none", "--format", "text"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(ignored.returncode, 0)
+        self.assertNotIn("synthetic-placeholder", ignored.stdout)
+
 
     def test_reports_risky_patterns_without_leaking_values(self):
         findings = scan_config({"mcpServers": {
