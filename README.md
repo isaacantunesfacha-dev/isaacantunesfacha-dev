@@ -24,6 +24,10 @@
 </p>
 
 <p align="center">
+  <a href="./mcp-scanner"><strong>MCP Scanner</strong> — offline security checks for MCP configuration files</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/Isaac-Antunes/virafolha"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/card-virafolha-dark.svg"><img src="./assets/card-virafolha-light.svg" width="49%" alt="virafolha"></picture></a>
   <a href="mailto:iantunessp@gmail.com"><picture><source media="(prefers-color-scheme: dark)" srcset="./assets/card-services-dark.svg"><img src="./assets/card-services-light.svg" width="49%" alt="Web, Design & CRM Studio — Hire / Freelance"></picture></a>
 </p>
